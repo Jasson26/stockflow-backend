@@ -141,7 +141,13 @@ app.get("/reset-users", async (req, res) => {
 
  try {
 
+  // hapus sessions jika ada
+  await pool.query(`DELETE FROM sessions`)
+
+  // hapus users
   await pool.query(`DELETE FROM users`)
+
+  // reset auto increment
   await pool.query(`ALTER SEQUENCE users_id_seq RESTART WITH 1`)
 
   res.json({
