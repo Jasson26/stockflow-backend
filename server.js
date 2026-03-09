@@ -1,12 +1,12 @@
-const express = require("express")
-const cors = require("cors")
-const { Pool } = require("pg")
-const PDFDocument = require("pdfkit")
+const express = require("express");
+const cors = require("cors");
+const { Pool } = require("pg");
+const sgMail = require("@sendgrid/mail");
 
-const app = express()
+const app = express();
 
-app.use(cors())
-app.use(express.json())
+app.use(cors());
+app.use(express.json());
 
 /*
 ========================
@@ -15,9 +15,27 @@ DATABASE
 */
 
 const pool = new Pool({
- connectionString: process.env.DATABASE_URL,
- ssl:{rejectUnauthorized:false}
-})
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
+/*
+========================
+SENDGRID EMAIL
+========================
+*/
+
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+
+/*
+========================
+HELPERS
+========================
+*/
+
+function generateCode() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
 
 /*
 ========================
@@ -25,14 +43,12 @@ ROOT
 ========================
 */
 
-app.get("/",(req,res)=>{
-
- res.json({
-  ok:true,
-  message:"StockFlow API Running"
- })
-
-})
+app.get("/", (req, res) => {
+  res.json({
+    ok: true,
+    message: "StockFlow API Running"
+  });
+});
 
 /*
 ========================
@@ -40,105 +56,109 @@ INIT DATABASE
 ========================
 */
 
-app.get("/init-db",async(req,res)=>{
+app.get("/init-db", async (req, res) => {
+  try {
 
- try{
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users(
+        id SERIAL PRIMARY KEY,
+        name TEXT,
+        email TEXT UNIQUE,
+        password TEXT,
+        role TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
 
- await pool.query(`
- CREATE TABLE IF NOT EXISTS users(
- id SERIAL PRIMARY KEY,
- name TEXT,
- email TEXT UNIQUE,
- password TEXT,
- role TEXT,
- created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
- )
- `)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS products(
+        id SERIAL PRIMARY KEY,
+        name TEXT,
+        category TEXT,
+        price_buy INTEGER,
+        price_sell INTEGER,
+        stock INTEGER,
+        min_stock INTEGER,
+        barcode TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
 
- await pool.query(`
- CREATE TABLE IF NOT EXISTS products(
- id SERIAL PRIMARY KEY,
- name TEXT,
- category TEXT,
- price_buy INTEGER,
- price_sell INTEGER,
- stock INTEGER,
- min_stock INTEGER,
- barcode TEXT,
- created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
- )
- `)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS sales(
+        id SERIAL PRIMARY KEY,
+        product_id INTEGER,
+        product_name TEXT,
+        qty INTEGER,
+        total INTEGER,
+        status TEXT,
+        staff TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
 
- await pool.query(`
- CREATE TABLE IF NOT EXISTS sales(
- id SERIAL PRIMARY KEY,
- product_id INTEGER,
- product_name TEXT,
- qty INTEGER,
- total INTEGER,
- status TEXT,
- staff TEXT,
- created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
- )
- `)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS password_resets(
+        id SERIAL PRIMARY KEY,
+        email TEXT,
+        code TEXT,
+        expires_at TIMESTAMP,
+        used BOOLEAN DEFAULT FALSE
+      )
+    `);
 
- res.json({
- ok:true,
- message:"DATABASE READY"
- })
+    res.json({
+      ok: true,
+      message: "DATABASE TABLES CREATED"
+    });
 
- }catch(err){
-
- res.json({
- ok:false,
- error:err.message
- })
-
- }
-
-})
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      error: err.message
+    });
+  }
+});
 
 /*
 ========================
 REGISTER
+User pertama = OWNER
 ========================
 */
 
-app.post("/auth/register",async(req,res)=>{
+app.post("/auth/register", async (req, res) => {
 
- try{
+  try {
 
- const {name,email,password}=req.body
+    const { name, email, password } = req.body;
 
- const count=await pool.query(`
- SELECT COUNT(*) FROM users
- `)
+    const count = await pool.query(`SELECT COUNT(*) FROM users`);
 
- const role = Number(count.rows[0].count)===0
- ? "OWNER"
- : "STAFF"
+    const role = Number(count.rows[0].count) === 0 ? "OWNER" : "STAFF";
 
- const result=await pool.query(`
- INSERT INTO users(name,email,password,role)
- VALUES($1,$2,$3,$4)
- RETURNING id,name,email,role
- `,[name,email,password,role])
+    const result = await pool.query(`
+      INSERT INTO users(name,email,password,role)
+      VALUES($1,$2,$3,$4)
+      RETURNING id,name,email,role
+    `,[name,email,password,role]);
 
- res.json({
- ok:true,
- data:result.rows[0]
- })
+    res.json({
+      ok: true,
+      message: "REGISTER SUCCESS",
+      data: result.rows[0]
+    });
 
- }catch(err){
+  } catch (err) {
 
- res.json({
- ok:false,
- error:err.message
- })
+    res.status(500).json({
+      ok:false,
+      error:err.message
+    });
 
- }
+  }
 
-})
+});
 
 /*
 ========================
@@ -146,42 +166,166 @@ LOGIN
 ========================
 */
 
-app.post("/auth/login",async(req,res)=>{
+app.post("/auth/login", async (req, res) => {
 
- try{
+  try {
 
- const {email,password}=req.body
+    const { email, password } = req.body;
 
- const result=await pool.query(`
- SELECT id,name,email,role
- FROM users
- WHERE email=$1 AND password=$2
- `,[email,password])
+    const result = await pool.query(`
+      SELECT id,name,email,role
+      FROM users
+      WHERE email=$1 AND password=$2
+    `,[email,password]);
 
- if(result.rows.length===0){
+    if(result.rows.length === 0){
 
- return res.json({
- ok:false,
- error:"Login gagal"
- })
+      return res.status(401).json({
+        ok:false,
+        error:"Email atau password salah"
+      });
 
- }
+    }
 
- res.json({
- ok:true,
- data:result.rows[0]
- })
+    res.json({
+      ok:true,
+      data:result.rows[0]
+    });
 
- }catch(err){
+  } catch(err){
 
- res.json({
- ok:false,
- error:err.message
- })
+    res.status(500).json({
+      ok:false,
+      error:err.message
+    });
 
- }
+  }
 
-})
+});
+
+/*
+========================
+FORGOT PASSWORD
+========================
+*/
+
+app.post("/auth/forgot-password", async (req,res)=>{
+
+  try{
+
+    const { email } = req.body;
+
+    const user = await pool.query(`
+      SELECT * FROM users
+      WHERE email=$1
+    `,[email]);
+
+    if(user.rows.length === 0){
+
+      return res.json({
+        ok:false,
+        error:"Email tidak ditemukan"
+      });
+
+    }
+
+    const code = generateCode();
+
+    const expire = new Date(Date.now() + 10*60*1000);
+
+    await pool.query(`
+      INSERT INTO password_resets(email,code,expires_at)
+      VALUES($1,$2,$3)
+    `,[email,code,expire]);
+
+    await sgMail.send({
+
+      to: email,
+
+      from: process.env.SENDGRID_FROM,
+
+      subject: "StockFlow Reset Password",
+
+      html: `
+      <h2>StockFlow Reset Password</h2>
+      <p>Kode reset password kamu:</p>
+      <h1>${code}</h1>
+      <p>Kode berlaku 10 menit</p>
+      `
+
+    });
+
+    res.json({
+      ok:true,
+      message:"Reset code sent to email"
+    });
+
+  }catch(err){
+
+    res.status(500).json({
+      ok:false,
+      error:err.message
+    });
+
+  }
+
+});
+
+/*
+========================
+RESET PASSWORD
+========================
+*/
+
+app.post("/auth/reset-password", async (req,res)=>{
+
+  try{
+
+    const { email, code, newPassword } = req.body;
+
+    const reset = await pool.query(`
+      SELECT * FROM password_resets
+      WHERE email=$1 AND code=$2 AND used=false
+      ORDER BY id DESC
+      LIMIT 1
+    `,[email,code]);
+
+    if(reset.rows.length === 0){
+
+      return res.json({
+        ok:false,
+        error:"Invalid code"
+      });
+
+    }
+
+    await pool.query(`
+      UPDATE users
+      SET password=$1
+      WHERE email=$2
+    `,[newPassword,email]);
+
+    await pool.query(`
+      UPDATE password_resets
+      SET used=true
+      WHERE id=$1
+    `,[reset.rows[0].id]);
+
+    res.json({
+      ok:true,
+      message:"Password updated"
+    });
+
+  }catch(err){
+
+    res.status(500).json({
+      ok:false,
+      error:err.message
+    });
+
+  }
+
+});
 
 /*
 ========================
@@ -189,34 +333,42 @@ ADD PRODUCT
 ========================
 */
 
-app.post("/products/add",async(req,res)=>{
+app.post("/products/add", async (req,res)=>{
 
- try{
+  try{
 
- const {name,category,price_buy,price_sell,stock,min_stock,barcode}=req.body
+    const {
+      name,
+      category,
+      price_buy,
+      price_sell,
+      stock,
+      min_stock,
+      barcode
+    } = req.body;
 
- const result=await pool.query(`
- INSERT INTO products
- (name,category,price_buy,price_sell,stock,min_stock,barcode)
- VALUES($1,$2,$3,$4,$5,$6,$7)
- RETURNING *
- `,[name,category,price_buy,price_sell,stock,min_stock,barcode])
+    const result = await pool.query(`
+      INSERT INTO products
+      (name,category,price_buy,price_sell,stock,min_stock,barcode)
+      VALUES($1,$2,$3,$4,$5,$6,$7)
+      RETURNING *
+    `,[name,category,price_buy,price_sell,stock,min_stock,barcode]);
 
- res.json({
- ok:true,
- data:result.rows[0]
- })
+    res.json({
+      ok:true,
+      data:result.rows[0]
+    });
 
- }catch(err){
+  }catch(err){
 
- res.json({
- ok:false,
- error:err.message
- })
+    res.status(500).json({
+      ok:false,
+      error:err.message
+    });
 
- }
+  }
 
-})
+});
 
 /*
 ========================
@@ -224,51 +376,19 @@ GET PRODUCTS
 ========================
 */
 
-app.get("/products",async(req,res)=>{
+app.get("/products", async (req,res)=>{
 
- const result=await pool.query(`
- SELECT * FROM products
- ORDER BY created_at DESC
- `)
+  const result = await pool.query(`
+    SELECT * FROM products
+    ORDER BY id DESC
+  `);
 
- res.json({
- ok:true,
- data:result.rows
- })
+  res.json({
+    ok:true,
+    data:result.rows
+  });
 
-})
-
-/*
-========================
-BARCODE LOOKUP
-========================
-*/
-
-app.get("/products/barcode/:code",async(req,res)=>{
-
- const {code}=req.params
-
- const result=await pool.query(`
- SELECT *
- FROM products
- WHERE barcode=$1
- `,[code])
-
- if(result.rows.length===0){
-
- return res.json({
- ok:false,
- error:"Product not found"
- })
-
- }
-
- res.json({
- ok:true,
- data:result.rows[0]
- })
-
-})
+});
 
 /*
 ========================
@@ -276,23 +396,23 @@ STOCK IN
 ========================
 */
 
-app.post("/stock/in",async(req,res)=>{
+app.post("/stock/in", async (req,res)=>{
 
- const {id,qty}=req.body
+  const { id, qty } = req.body;
 
- const result=await pool.query(`
- UPDATE products
- SET stock = stock + $1
- WHERE id=$2
- RETURNING *
- `,[qty,id])
+  const result = await pool.query(`
+    UPDATE products
+    SET stock = stock + $1
+    WHERE id=$2
+    RETURNING *
+  `,[qty,id]);
 
- res.json({
- ok:true,
- data:result.rows[0]
- })
+  res.json({
+    ok:true,
+    data:result.rows[0]
+  });
 
-})
+});
 
 /*
 ========================
@@ -300,67 +420,64 @@ STOCK OUT
 ========================
 */
 
-app.post("/stock/out",async(req,res)=>{
+app.post("/stock/out", async (req,res)=>{
 
- const {id,qty,staff}=req.body
+  const { id, qty, staff } = req.body;
 
- const product=await pool.query(`
- SELECT * FROM products WHERE id=$1
- `,[id])
+  const product = await pool.query(`
+    SELECT * FROM products
+    WHERE id=$1
+  `,[id]);
 
- const item=product.rows[0]
+  const item = product.rows[0];
 
- const total=item.price_sell * qty
+  const total = item.price_sell * qty;
 
- await pool.query(`
- UPDATE products
- SET stock=stock-$1
- WHERE id=$2
- `,[qty,id])
+  await pool.query(`
+    UPDATE products
+    SET stock = stock - $1
+    WHERE id=$2
+  `,[qty,id]);
 
- await pool.query(`
- INSERT INTO sales(product_id,product_name,qty,total,status,staff)
- VALUES($1,$2,$3,$4,'DONE',$5)
- `,[id,item.name,qty,total,staff])
+  await pool.query(`
+    INSERT INTO sales(product_id,product_name,qty,total,status,staff)
+    VALUES($1,$2,$3,$4,'DONE',$5)
+  `,[id,item.name,qty,total,staff]);
 
- res.json({
- ok:true
- })
+  res.json({ ok:true });
 
-})
+});
 
 /*
 ========================
-STOCK DAMAGE
+BARANG RUSAK
 ========================
 */
 
-app.post("/stock/damage",async(req,res)=>{
+app.post("/stock/damage", async (req,res)=>{
 
- const {id,qty,staff}=req.body
+  const { id, qty, staff } = req.body;
 
- const product=await pool.query(`
- SELECT * FROM products WHERE id=$1
- `,[id])
+  const product = await pool.query(`
+    SELECT * FROM products WHERE id=$1
+  `,[id]);
 
- const item=product.rows[0]
+  const item = product.rows[0];
 
- await pool.query(`
- UPDATE products
- SET stock=stock-$1
- WHERE id=$2
- `,[qty,id])
+  await pool.query(`
+    UPDATE products
+    SET stock = stock - $1
+    WHERE id=$2
+  `,[qty,id]);
 
- await pool.query(`
- INSERT INTO sales(product_id,product_name,qty,total,status,staff)
- VALUES($1,$2,$3,0,'RUSAK',$4)
- `,[id,item.name,qty,staff])
+  await pool.query(`
+    INSERT INTO sales(product_id,product_name,qty,total,status,staff)
+    VALUES($1,$2,$3,0,'RUSAK',$4)
+  `,[id,item.name,qty,staff]);
 
- res.json({
- ok:true
- })
+  res.json({ ok:true });
 
-})
+});
 
 /*
 ========================
@@ -368,123 +485,93 @@ SALES REPORT
 ========================
 */
 
-app.get("/sales/report",async(req,res)=>{
+app.get("/sales/report", async (req,res)=>{
 
- const result=await pool.query(`
- SELECT * FROM sales
- ORDER BY created_at DESC
- `)
+  const result = await pool.query(`
+    SELECT * FROM sales
+    ORDER BY id DESC
+  `);
 
- res.json({
- ok:true,
- data:result.rows
- })
+  res.json({
+    ok:true,
+    data:result.rows
+  });
 
-})
-
-/*
-========================
-PDF REPORT
-========================
-*/
-
-app.get("/sales/report/pdf",async(req,res)=>{
-
- const result=await pool.query(`
- SELECT *
- FROM sales
- ORDER BY created_at DESC
- `)
-
- const doc=new PDFDocument()
-
- res.setHeader("Content-Type","application/pdf")
- res.setHeader("Content-Disposition","inline; filename=report.pdf")
-
- doc.pipe(res)
-
- doc.fontSize(20).text("StockFlow Sales Report",{align:"center"})
-
- doc.moveDown()
-
- result.rows.forEach(sale=>{
-
- doc.fontSize(12).text(`
- Product : ${sale.product_name}
- Qty : ${sale.qty}
- Total : Rp ${sale.total}
- Status : ${sale.status}
- Staff : ${sale.staff}
- Date : ${sale.created_at}
- ------------------------------
- `)
-
- })
-
- doc.end()
-
-})
+});
 
 /*
 ========================
-DASHBOARD
+DASHBOARD DATA
 ========================
 */
 
-app.get("/dashboard",async(req,res)=>{
+app.get("/dashboard", async (req,res)=>{
 
- const balance=await pool.query(`
- SELECT COALESCE(SUM(total),0) AS balance
- FROM sales
- WHERE status='DONE'
- `)
+  const balance = await pool.query(`
+    SELECT COALESCE(SUM(total),0) as balance
+    FROM sales
+    WHERE status='DONE'
+  `);
 
- const lowStock=await pool.query(`
- SELECT COUNT(*) FROM products
- WHERE stock<=min_stock
- `)
+  const sold = await pool.query(`
+    SELECT COALESCE(SUM(qty),0) as sold
+    FROM sales
+    WHERE status='DONE'
+  `);
 
- res.json({
- ok:true,
- balance:balance.rows[0].balance,
- lowStock:lowStock.rows[0].count
- })
+  const low = await pool.query(`
+    SELECT COUNT(*) FROM products
+    WHERE stock <= min_stock
+  `);
 
-})
+  res.json({
+
+    ok:true,
+
+    balance:balance.rows[0].balance,
+
+    sold:sold.rows[0].sold,
+
+    lowStock:low.rows[0].count
+
+  });
+
+});
 
 /*
 ========================
-TRACKER GRAPH
+TRACKER
 ========================
 */
 
-app.get("/tracker",async(req,res)=>{
+app.get("/tracker", async (req,res)=>{
 
- const result=await pool.query(`
- SELECT DATE(created_at) AS day,
- SUM(total) AS total
- FROM sales
- WHERE status='DONE'
- GROUP BY day
- ORDER BY day DESC
- LIMIT 7
- `)
+  const result = await pool.query(`
+    SELECT DATE(created_at) as day, SUM(total) as total
+    FROM sales
+    WHERE status='DONE'
+    GROUP BY day
+    ORDER BY day DESC
+    LIMIT 7
+  `);
 
- res.json({
- ok:true,
- data:result.rows
- })
+  res.json({
+    ok:true,
+    data:result.rows
+  });
 
-})
+});
 
 /*
 ========================
-SERVER START
+SERVER
 ========================
 */
 
-const PORT = process.env.PORT || 8080
+const PORT = process.env.PORT || 8080;
 
-app.listen(PORT,()=>{
- console.log("Server running on port",PORT)
-})
+app.listen(PORT, () => {
+
+  console.log("Server running on port", PORT);
+
+});
