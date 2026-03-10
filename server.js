@@ -1,79 +1,115 @@
-const express = require("express");
-const cors = require("cors");
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
-const { Pool } = require("pg");
+const express = require("express")
+const cors = require("cors")
+const bcrypt = require("bcryptjs")
+const jwt = require("jsonwebtoken")
+const { Pool } = require("pg")
 
-const app = express();
+const app = express()
 
-app.use(cors());
-app.use(express.json());
+app.use(cors())
+app.use(express.json())
+
+const PORT = process.env.PORT || 8080
+const SECRET = "stockflow-secret"
+
+/*
+SAFE DATABASE CONNECTION
+*/
+if(!process.env.DATABASE_URL){
+console.error("DATABASE_URL NOT FOUND")
+process.exit(1)
+}
 
 const pool = new Pool({
-connectionString: process.env.DATABASE_URL,
-ssl: { rejectUnauthorized: false }
-});
+connectionString:process.env.DATABASE_URL,
+ssl:{rejectUnauthorized:false}
+})
 
-const SECRET = "stockflow-secret";
+pool.connect()
+.then(()=>console.log("DATABASE CONNECTED"))
+.catch(err=>{
+console.error("DATABASE ERROR",err)
+process.exit(1)
+})
+
+/*
+AUTH MIDDLEWARE
+*/
 
 function auth(req,res,next){
 
-const authHeader = req.headers.authorization;
+const header = req.headers.authorization
 
-if(!authHeader){
-return res.json({ok:false,error:"unauthorized"});
+if(!header){
+return res.json({ok:false,error:"no token"})
 }
-
-const token = authHeader.split(" ")[1];
 
 try{
 
-const user = jwt.verify(token,SECRET);
+const token = header.split(" ")[1]
 
-req.user=user;
+const decoded = jwt.verify(token,SECRET)
 
-next();
+req.user = decoded
 
-}catch{
+next()
 
-return res.json({ok:false,error:"invalid token"});
+}catch(e){
+
+return res.json({ok:false,error:"invalid token"})
 
 }
 
 }
+
+/*
+HEALTH CHECK
+*/
 
 app.get("/",(req,res)=>{
-
 res.json({
 ok:true,
-message:"StockFlow API Running"
-});
+service:"StockFlow Backend",
+status:"running"
+})
+})
 
-});
+/*
+RESET DATABASE
+*/
 
 app.get("/reset-dev",async(req,res)=>{
 
-await pool.query("DROP TABLE IF EXISTS stock_history");
-await pool.query("DROP TABLE IF EXISTS products");
-await pool.query("DROP TABLE IF EXISTS users");
-await pool.query("DROP TABLE IF EXISTS stores");
-await pool.query("DROP TABLE IF EXISTS invites");
+try{
 
-res.json({
-ok:true,
-message:"DEV RESET DONE"
-});
+await pool.query("DROP TABLE IF EXISTS stock_history CASCADE")
+await pool.query("DROP TABLE IF EXISTS products CASCADE")
+await pool.query("DROP TABLE IF EXISTS invites CASCADE")
+await pool.query("DROP TABLE IF EXISTS users CASCADE")
+await pool.query("DROP TABLE IF EXISTS stores CASCADE")
 
-});
+res.json({ok:true})
+
+}catch(e){
+res.json({ok:false,error:e.message})
+}
+
+})
+
+/*
+INIT DATABASE
+*/
 
 app.get("/init-db",async(req,res)=>{
+
+try{
 
 await pool.query(`
 CREATE TABLE IF NOT EXISTS stores(
 id SERIAL PRIMARY KEY,
 name TEXT
 )
-`);
+`)
 
 await pool.query(`
 CREATE TABLE IF NOT EXISTS users(
@@ -84,7 +120,7 @@ password TEXT,
 role TEXT,
 store_id INTEGER
 )
-`);
+`)
 
 await pool.query(`
 CREATE TABLE IF NOT EXISTS invites(
@@ -92,7 +128,7 @@ id SERIAL PRIMARY KEY,
 code TEXT,
 store_id INTEGER
 )
-`);
+`)
 
 await pool.query(`
 CREATE TABLE IF NOT EXISTS products(
@@ -102,7 +138,7 @@ stock INTEGER DEFAULT 0,
 price INTEGER DEFAULT 0,
 store_id INTEGER
 )
-`);
+`)
 
 await pool.query(`
 CREATE TABLE IF NOT EXISTS stock_history(
@@ -115,332 +151,211 @@ status TEXT,
 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 store_id INTEGER
 )
-`);
+`)
 
-res.json({
-ok:true,
-message:"DATABASE TABLES CREATED"
-});
+res.json({ok:true})
 
-});
+}catch(e){
+
+res.json({ok:false,error:e.message})
+
+}
+
+})
+
+/*
+REGISTER OWNER
+*/
 
 app.post("/auth/register-owner",async(req,res)=>{
 
-const {name,email,password,store_name} = req.body;
+try{
 
-const hash = await bcrypt.hash(password,10);
+const {name,email,password,store_name} = req.body
+
+const hash = await bcrypt.hash(password,10)
 
 const store = await pool.query(
-"INSERT INTO stores(name) VALUES($1) RETURNING *",
+`INSERT INTO stores(name) VALUES($1) RETURNING *`,
 [store_name]
-);
+)
 
-const storeId = store.rows[0].id;
+const storeId = store.rows[0].id
 
 await pool.query(
-"INSERT INTO users(name,email,password,role,store_id) VALUES($1,$2,$3,$4,$5)",
+`INSERT INTO users(name,email,password,role,store_id)
+VALUES($1,$2,$3,$4,$5)`,
 [name,email,hash,"OWNER",storeId]
-);
+)
 
-res.json({
-ok:true,
-message:"OWNER REGISTERED"
-});
+res.json({ok:true})
 
-});
+}catch(e){
 
-app.post("/auth/register-staff",async(req,res)=>{
+res.json({ok:false,error:e.message})
 
-const {name,email,password,invite_code} = req.body;
-
-const invite = await pool.query(
-"SELECT * FROM invites WHERE code=$1",
-[invite_code]
-);
-
-if(invite.rows.length===0){
-return res.json({ok:false,error:"invalid invite code"});
 }
 
-const storeId = invite.rows[0].store_id;
+})
 
-const hash = await bcrypt.hash(password,10);
-
-await pool.query(
-"INSERT INTO users(name,email,password,role,store_id) VALUES($1,$2,$3,$4,$5)",
-[name,email,hash,"STAFF",storeId]
-);
-
-res.json({
-ok:true,
-message:"STAFF REGISTERED"
-});
-
-});
+/*
+LOGIN
+*/
 
 app.post("/auth/login",async(req,res)=>{
 
-const {email,password} = req.body;
+try{
+
+const {email,password} = req.body
 
 const user = await pool.query(
-"SELECT * FROM users WHERE email=$1",
+`SELECT * FROM users WHERE email=$1`,
 [email]
-);
+)
 
 if(user.rows.length===0){
-return res.json({ok:false,error:"user not found"});
+return res.json({ok:false,error:"user not found"})
 }
 
-const u = user.rows[0];
+const u = user.rows[0]
 
-const match = await bcrypt.compare(password,u.password);
+const valid = await bcrypt.compare(password,u.password)
 
-if(!match){
-return res.json({ok:false,error:"wrong password"});
+if(!valid){
+return res.json({ok:false,error:"wrong password"})
 }
 
 const token = jwt.sign({
 id:u.id,
 store_id:u.store_id,
 role:u.role
-},SECRET);
+},SECRET)
 
 res.json({
 ok:true,
 token,
-data:{
-id:u.id,
+user:{
 name:u.name,
-email:u.email,
 role:u.role
 }
-});
+})
 
-});
+}catch(e){
 
-app.get("/auth/me",auth,async(req,res)=>{
+res.json({ok:false,error:e.message})
 
-const user = await pool.query(
-"SELECT * FROM users WHERE id=$1",
-[req.user.id]
-);
-
-res.json({
-ok:true,
-data:user.rows[0]
-});
-
-});
-
-app.post("/owner/invite-staff",auth,async(req,res)=>{
-
-if(req.user.role!=="OWNER"){
-return res.json({ok:false,error:"owner only"});
 }
 
-const code = Math.random().toString(36).substring(2,8).toUpperCase();
+})
+
+/*
+ADD PRODUCT
+*/
+
+app.post("/product/add",auth,async(req,res)=>{
+
+try{
+
+const {name,stock,price} = req.body
 
 await pool.query(
-"INSERT INTO invites(code,store_id) VALUES($1,$2)",
-[code,req.user.store_id]
-);
+`INSERT INTO products(name,stock,price,store_id)
+VALUES($1,$2,$3,$4)`,
+[name,stock,price,req.user.store_id]
+)
 
-res.json({
-ok:true,
-data:{code}
-});
+res.json({ok:true})
 
-});
+}catch(e){
+
+res.json({ok:false,error:e.message})
+
+}
+
+})
+
+/*
+GET PRODUCTS
+*/
 
 app.get("/products",auth,async(req,res)=>{
 
-const products = await pool.query(
-"SELECT * FROM products WHERE store_id=$1",
+const data = await pool.query(
+`SELECT * FROM products WHERE store_id=$1`,
 [req.user.store_id]
-);
+)
 
 res.json({
 ok:true,
-data:products.rows
-});
+data:data.rows
+})
 
-});
+})
+
+/*
+STOCK IN
+*/
 
 app.post("/stock/in",auth,async(req,res)=>{
 
-const {product_name,qty} = req.body;
-
-let product = await pool.query(
-"SELECT * FROM products WHERE name=$1 AND store_id=$2",
-[product_name,req.user.store_id]
-);
-
-if(product.rows.length===0){
-
-product = await pool.query(
-"INSERT INTO products(name,stock,store_id) VALUES($1,$2,$3) RETURNING *",
-[product_name,qty,req.user.store_id]
-);
-
-}else{
+const {product_id,qty} = req.body
 
 await pool.query(
-"UPDATE products SET stock=stock+$1 WHERE id=$2",
-[qty,product.rows[0].id]
-);
+`UPDATE products SET stock=stock+$1 WHERE id=$2`,
+[qty,product_id]
+)
 
-}
+res.json({ok:true})
 
-res.json({
-ok:true,
-message:"stock added"
-});
+})
 
-});
+/*
+STOCK OUT
+*/
 
 app.post("/stock/out",auth,async(req,res)=>{
 
-const {product_name,qty} = req.body;
+const {product_id,qty} = req.body
 
-const product = await pool.query(
-"SELECT * FROM products WHERE name=$1 AND store_id=$2",
-[product_name,req.user.store_id]
-);
+const p = await pool.query(
+`SELECT * FROM products WHERE id=$1`,
+[product_id]
+)
 
-if(product.rows.length===0){
-return res.json({ok:false,error:"product not found"});
-}
-
-if(product.rows[0].stock < qty){
-return res.json({ok:false,error:"stock not enough"});
+if(p.rows[0].stock < qty){
+return res.json({ok:false,error:"stock not enough"})
 }
 
 await pool.query(
-"UPDATE products SET stock=stock-$1 WHERE id=$2",
-[qty,product.rows[0].id]
-);
+`UPDATE products SET stock=stock-$1 WHERE id=$2`,
+[qty,product_id]
+)
 
-await pool.query(
-"INSERT INTO stock_history(product_id,qty,type,total,status,store_id) VALUES($1,$2,$3,$4,$5,$6)",
-[
-product.rows[0].id,
-qty,
-"OUT",
-product.rows[0].price*qty,
-"DONE",
-req.user.store_id
-]
-);
+res.json({ok:true})
 
-res.json({ok:true});
+})
 
-});
+/*
+DAMAGE
+*/
 
 app.post("/stock/damage",auth,async(req,res)=>{
 
-const {product_name,qty} = req.body;
-
-const product = await pool.query(
-"SELECT * FROM products WHERE name=$1 AND store_id=$2",
-[product_name,req.user.store_id]
-);
+const {product_id,qty} = req.body
 
 await pool.query(
-"UPDATE products SET stock=stock-$1 WHERE id=$2",
-[qty,product.rows[0].id]
-);
+`UPDATE products SET stock=stock-$1 WHERE id=$2`,
+[qty,product_id]
+)
 
-await pool.query(
-"INSERT INTO stock_history(product_id,qty,type,total,status,store_id) VALUES($1,$2,$3,$4,$5,$6)",
-[
-product.rows[0].id,
-qty,
-"DAMAGE",
-0,
-"RUSAK",
-req.user.store_id
-]
-);
+res.json({ok:true})
 
-res.json({ok:true});
+})
 
-});
-
-app.get("/sales/report",auth,async(req,res)=>{
-
-const sales = await pool.query(
-`
-SELECT
-p.name as product_name,
-h.qty,
-h.total,
-h.status,
-h.created_at
-FROM stock_history h
-JOIN products p ON h.product_id=p.id
-WHERE h.store_id=$1
-ORDER BY h.created_at DESC
-`,
-[req.user.store_id]
-);
-
-res.json({
-ok:true,
-data:sales.rows
-});
-
-});
-
-app.get("/dashboard",auth,async(req,res)=>{
-
-const balance = await pool.query(
-"SELECT SUM(total) FROM stock_history WHERE store_id=$1 AND status='DONE'",
-[req.user.store_id]
-);
-
-const sold = await pool.query(
-"SELECT SUM(qty) FROM stock_history WHERE store_id=$1 AND status='DONE'",
-[req.user.store_id]
-);
-
-const low = await pool.query(
-"SELECT * FROM products WHERE store_id=$1 ORDER BY stock ASC LIMIT 1",
-[req.user.store_id]
-);
-
-res.json({
-ok:true,
-balance:balance.rows[0].sum||0,
-sold:sold.rows[0].sum||0,
-lowStock:low.rows.length,
-lowestItem:low.rows[0]||null
-});
-
-});
-
-app.get("/tracker",auth,async(req,res)=>{
-
-const tracker = await pool.query(
-`
-SELECT DATE(created_at) as day, SUM(total) as total
-FROM stock_history
-WHERE store_id=$1
-GROUP BY DATE(created_at)
-ORDER BY day DESC
-LIMIT 7
-`,
-[req.user.store_id]
-);
-
-res.json({
-ok:true,
-data:tracker.rows
-});
-
-});
-
-const PORT = process.env.PORT || 8080;
+/*
+START SERVER
+*/
 
 app.listen(PORT,()=>{
-console.log("Server running on",PORT);
-});
+console.log("SERVER RUNNING",PORT)
+})
