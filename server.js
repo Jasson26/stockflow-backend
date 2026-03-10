@@ -1,6 +1,6 @@
 const express = require("express");
 const cors = require("cors");
-const bcrypt = require("bcrypt");
+const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { Pool } = require("pg");
 
@@ -11,9 +11,7 @@ app.use(express.json());
 
 const pool = new Pool({
 connectionString: process.env.DATABASE_URL,
-ssl: {
-rejectUnauthorized:false
-}
+ssl: { rejectUnauthorized: false }
 });
 
 const SECRET = "stockflow-secret";
