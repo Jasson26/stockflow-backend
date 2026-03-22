@@ -492,7 +492,7 @@ app.get("/tracker", auth, async (req, res) => {
       `
       SELECT DATE(created_at) as day, SUM(total) as total
       FROM stock_history
-      WHERE store_id=$1
+      WHERE store_id=$1 AND status='DONE'
       GROUP BY DATE(created_at)
       ORDER BY day DESC
       LIMIT 7
